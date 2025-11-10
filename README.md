@@ -17,9 +17,6 @@ pip install --upgrade pip
 pip install -r requirements.txt
 # ffmpeg required for Whisper
 # macOS: brew install ffmpeg | Windows: choco install ffmpeg
-# Set Anthropic API key:
-#  macOS/Linux: export ANTHROPIC_API_KEY="sk-ant-..."
-#  Windows PS:  $env:ANTHROPIC_API_KEY="sk-ant-..."
 uvicorn app:app --reload --port 8000
 ```
 
