@@ -1,0 +1,42 @@
+# Python caches and artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging / build outputs
+build/
+dist/
+
+# Node / Vite
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.log
+
+# Environment files
+.env
+.env.*
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*.orig
+
+# OS junk
+.DS_Store
+Thumbs.db
+$RECYCLE.BIN/
+.DS_Store?
+*.Spotlight-V100
+*.Trashes
+
+# Audio caches (leave testAudio tracked)
+*.wav.tmp
+*.flac.tmp
