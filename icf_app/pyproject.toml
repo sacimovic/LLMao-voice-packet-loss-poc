@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "llmao-copilot"
+version = "0.1.0"
+description = "FMO Copilot app for real-time audio packet loss repair"
+authors = ["RenAIssance Hackathon Team"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+icf-media-sdk = {path = "../../fmo-hackathon-demo/sdk/python", develop = true}
+fastapi = "^0.115.5"
+numpy = ">=1.26,<2.0"
+soundfile = "^0.12.1"
+librosa = "^0.10.2"
+openai-whisper = ">=20231117"
+torch = "^2.3.0"
+TTS = "^0.22.0"
+transformers = ">=4.46.2,<4.50"
+sentencepiece = "^0.1.99"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
