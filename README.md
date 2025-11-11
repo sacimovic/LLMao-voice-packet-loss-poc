@@ -27,6 +27,8 @@ LLMao is an AI-powered audio repair tool that fixes degraded voice audio caused 
 - Phone Integration: FMO ICF Media SDK
 
 ## Backend
+Make sure you're using python 3.11 or greater (I found with python3.9 I got unresolvable dependency conflicts)
+
 ```bash
 cd backend
 python -m venv .venv
@@ -73,14 +75,14 @@ The app will listen on `ws://localhost:8084`.
 
 ### Register with FMO
 
-1. Start the FMO demo server (see `../fmo-hackathon-demo`)
+1. Start the FMO demo server (see `https://github.com/alianza-dev/fmo-hackathon-demo`)
 2. Open http://localhost:3001
 3. Register the app:
    - Name: LLMao Audio Repair
    - URL: ws://localhost:8084
    - Type: Copilot
-   - Receive Mode: Text (with partial transcription)
-   - Send Mode: Text
+   - Receive Mode: Text and Audio
+   - Send Mode: Audio
 
 ### Usage
 
