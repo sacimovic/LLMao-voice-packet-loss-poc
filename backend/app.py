@@ -2,6 +2,8 @@
 import io
 import base64
 import traceback
+from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,6 +17,10 @@ from audio_utils import (
     load_audio_mono_16k,
     write_wav_bytes,
 )
+
+# Create recordings directory
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+RECORDINGS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Voice Packet-Loss Hackathon API", version="0.1.0")
 
@@ -32,6 +38,8 @@ class ProcessResponse(BaseModel):
     degraded_wav_b64: str
     tts_wav_b64: str
     combined_wav_b64: str
+    original_file_path: str
+    degraded_file_path: str
 
 @app.post("/process", response_model=ProcessResponse)
 async def process_audio(
@@ -45,10 +53,20 @@ async def process_audio(
     synth_all_text: bool = Form(True)
 ):
     try:
+        # Generate unique ID for this upload
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        upload_id = f"upload-{timestamp}"
+        
         raw = await file.read()
         sr, y_orig = load_audio_mono_16k(io.BytesIO(raw))
         duration_ms = int(len(y_orig) / sr * 1000) if len(y_orig) and sr else 0
         mode = (degrade_mode or "percentage").strip().lower()
+        
+        # Save original audio
+        original_file = RECORDINGS_DIR / f"{upload_id}-original.wav"
+        original_wav = write_wav_bytes(y_orig, sr)
+        with open(original_file, 'wb') as f:
+            f.write(original_wav)
 
         if mode == "window":
             max_window = max(40, duration_ms // 3) if duration_ms else max(40, window_ms)
@@ -62,6 +80,12 @@ async def process_audio(
         else:
             degrade_ratio = max(0, min(100, int(degrade_percent))) / 100.0
             y_degraded = degrade_audio_simulated_loss(y_orig, sr, loss_ratio=degrade_ratio, chunk_ms=40)
+        
+        # Save degraded audio
+        degraded_file = RECORDINGS_DIR / f"{upload_id}-degraded.wav"
+        degraded_b = write_wav_bytes(y_degraded, sr)
+        with open(degraded_file, 'wb') as f:
+            f.write(degraded_b)
 
         asr_text = transcribe_whisper(y_degraded, sr, model_size=whisper_model)
         repaired_text = repair_text_with_local_model(asr_text, model_name=repair_model)
@@ -73,7 +97,6 @@ async def process_audio(
         else:
             combined_wav = stitch_simple_crossfade(y_degraded, sr, tts_wav, crossfade_ms=25)
 
-        degraded_b = write_wav_bytes(y_degraded, sr)
         combined_b = combined_wav if isinstance(combined_wav, (bytes, bytearray)) else write_wav_bytes(combined_wav, sr)
         tts_b = tts_wav if isinstance(tts_wav, (bytes, bytearray)) else write_wav_bytes(tts_wav, sr)
 
@@ -83,6 +106,8 @@ async def process_audio(
             degraded_wav_b64=base64.b64encode(degraded_b).decode("ascii"),
             tts_wav_b64=base64.b64encode(tts_b).decode("ascii"),
             combined_wav_b64=base64.b64encode(combined_b).decode("ascii"),
+            original_file_path=str(original_file.relative_to(Path(__file__).parent)),
+            degraded_file_path=str(degraded_file.relative_to(Path(__file__).parent)),
         )
     except Exception as e:
         traceback.print_exc()
@@ -92,6 +117,8 @@ async def process_audio(
             degraded_wav_b64="",
             tts_wav_b64="",
             combined_wav_b64="",
+            original_file_path="",
+            degraded_file_path="",
         )
 
 @app.get("/health")

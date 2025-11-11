@@ -40,3 +40,6 @@ $RECYCLE.BIN/
 # Audio caches (leave testAudio tracked)
 *.wav.tmp
 *.flac.tmp
+
+# Recorded files
+*/recordings/*

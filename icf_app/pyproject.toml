@@ -14,7 +14,7 @@ librosa = "*"
 openai-whisper = "*"
 torch = "*"
 TTS = {version = "*", python = ">=3.11,<3.12"}
-transformers = "*"
+transformers = "~4.33.0"
 sentencepiece = "*"
 
 [build-system]
