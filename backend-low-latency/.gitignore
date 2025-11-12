@@ -1,0 +1,11 @@
+# Rust backend binaries and build artifacts
+target/
+
+# Models directory (download separately)
+models/*.bin
+models/*.onnx
+models/flan-t5/
+models/.venv*
+
+# Cargo lock (keep for reproducibility in production, ignore in library crates)
+# Cargo.lock

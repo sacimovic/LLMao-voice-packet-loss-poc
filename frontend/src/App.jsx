@@ -287,26 +287,32 @@ export default function App() {
 
     try {
       const res = await fetch(`${API_URL}/process`, { method: 'POST', body: form })
-      const data = await res.json()
+      let data
+      try {
+        data = await res.json()
+      } catch (jsonErr) {
+        throw new Error(`Backend returned invalid JSON: ${jsonErr}`)
+      }
+
+      if (!res.ok) {
+        const message = data?.error || `Backend error (${res.status})`
+        throw new Error(message)
+      }
+
       const elapsed = performance.now() - processingStartRef.current
       setElapsedMs(elapsed)
-      if (data.asr_text?.startsWith('ERROR')) {
-        setError(data.asr_text)
-        setStatusPhase('error')
-        setStatusMessage('Processing failed – check backend logs for details.')
-      } else {
-        setStatusPhase('done')
-        setStatusMessage(`Processing complete in ${(elapsed / 1000).toFixed(1)}s. Enjoy the results!`)
-      }
+      setStatusPhase('done')
+      setStatusMessage(`Processing complete in ${(elapsed / 1000).toFixed(1)}s. Enjoy the results!`)
       setAsrText(data.asr_text || '')
       setRepairedText(data.repaired_text || '')
       if (data.degraded_wav_b64) updateUrl(setDegradedUrl, 'degraded', b64ToBlobUrl(data.degraded_wav_b64))
       if (data.tts_wav_b64) updateUrl(setTtsUrl, 'tts', b64ToBlobUrl(data.tts_wav_b64))
       if (data.combined_wav_b64) updateUrl(setCombinedUrl, 'combined', b64ToBlobUrl(data.combined_wav_b64))
     } catch (e) {
-      setError(String(e))
+      const message = e instanceof Error ? e.message : String(e)
+      setError(message)
       setStatusPhase('error')
-      setStatusMessage('Network error – confirm the backend is reachable and retry.')
+      setStatusMessage(message)
     } finally {
       statusTimers.current.forEach(clearTimeout)
       statusTimers.current = []

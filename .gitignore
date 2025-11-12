@@ -7,6 +7,9 @@ __pycache__/
 .venv/
 venv/
 env/
+.venv*/
+*/.venv/
+*/.venv*/
 
 # Packaging / build outputs
 build/
@@ -43,3 +46,8 @@ $RECYCLE.BIN/
 
 # Recorded files
 */recordings/*
+
+# Model artifacts
+tokenizer.json
+*.onnx
+*.bin
