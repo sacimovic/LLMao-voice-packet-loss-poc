@@ -18,7 +18,7 @@ mod tts;
 
 use asr::WhisperModel;
 use audio::load_audio_mono_16k;
-use degradation::degrade_audio;
+use degradation::{degrade_audio, degrade_audio_window};
 use repair::BedrockRepair;
 use tts::TTSEngine;
 
@@ -35,6 +35,9 @@ struct ProcessResponse {
     repaired_text: String,
     degraded_wav_b64: String,
     tts_wav_b64: String,
+    combined_wav_b64: String,
+    original_file_path: String,
+    degraded_file_path: String,
 }
 
 #[tokio::main]
@@ -77,6 +80,9 @@ async fn process_audio(
 ) -> Result<Json<ProcessResponse>, StatusCode> {
     let mut audio_bytes = None;
     let mut degrade_percent = 30;
+    let mut degrade_mode = String::from("percentage");
+    let mut window_ms = 40;
+    let mut window_start_ms = 0;
 
     while let Some(field) = multipart.next_field().await.unwrap() {
         let name = field.name().unwrap_or("").to_string();
@@ -90,6 +96,21 @@ async fn process_audio(
                     degrade_percent = text.parse().unwrap_or(30);
                 }
             }
+            "degrade_mode" => {
+                if let Ok(text) = field.text().await {
+                    degrade_mode = text;
+                }
+            }
+            "window_ms" => {
+                if let Ok(text) = field.text().await {
+                    window_ms = text.parse().unwrap_or(40);
+                }
+            }
+            "window_start_ms" => {
+                if let Ok(text) = field.text().await {
+                    window_start_ms = text.parse().unwrap_or(0);
+                }
+            }
             _ => {}
         }
     }
@@ -99,7 +120,13 @@ async fn process_audio(
     let original_audio = load_audio_mono_16k(&audio_bytes)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let degraded = degrade_audio(&original_audio, degrade_percent as f32);
+    let degraded = if degrade_mode == "window" {
+        info!("Using window degradation: {}ms window at {}ms", window_ms, window_start_ms);
+        degrade_audio_window(&original_audio, window_start_ms, window_ms)
+    } else {
+        info!("Using percentage degradation: {}%", degrade_percent);
+        degrade_audio(&original_audio, degrade_percent as f32)
+    };
 
     info!("Running Whisper ASR...");
     let asr_text = state.whisper.transcribe(&degraded)
@@ -129,12 +156,16 @@ async fn process_audio(
 
     let degraded_wav = encode_wav_base64(&degraded);
     let repaired_wav = encode_wav_base64(&tts_audio);
+    let combined_wav = repaired_wav.clone();
 
     Ok(Json(ProcessResponse {
         asr_text,
         repaired_text,
         degraded_wav_b64: degraded_wav,
         tts_wav_b64: repaired_wav,
+        combined_wav_b64: combined_wav,
+        original_file_path: String::from(""),
+        degraded_file_path: String::from(""),
     }))
 }
 

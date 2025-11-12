@@ -51,3 +51,6 @@ $RECYCLE.BIN/
 tokenizer.json
 *.onnx
 *.bin
+
+# Rust build artifacts
+*/target
