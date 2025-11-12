@@ -62,6 +62,15 @@ class AudioRepairCopilot:
         self.is_processing = False
         self.repair_count = 0
 
+        # Continuous recording for debugging
+        self.recording_caller = []
+        self.recording_callee = []
+        self.recording_enabled = False  # Set to True to enable continuous recording
+
+        # Track injected audio (what we send via send_audio_to_caller/callee)
+        self.injected_to_caller = []
+        self.injected_to_callee = []
+
         logger.info(
             f"📞 Call started: {call.calling_number} → {call.called_number} "
             f"(Sample rate: {self.sample_rate}Hz)"
@@ -113,10 +122,12 @@ class AudioRepairCopilot:
                 logger.info("🔄 Switching to bidirectional mode...")
                 await self.call.set_bidirectional()
                 logger.info("✅ Mode switch complete, now in bidirectional mode")
-            
+
             # TODO: Re-enable announcement once FMO TTS is configured properly
             # For now, skip the announcement to avoid connection issues
-            logger.info("📢 Skipping announcement, proceeding directly to repair...")
+            logger.info("📢 Announcing repair...")
+            announcement = self.call.say("Starting audio repair now.", mix_mode=MixMode.DUCK, send_to=requesting_party)
+            await announcement
 
             # Get the audio buffer for the target stream
             if target_stream == "caller":
@@ -157,7 +168,7 @@ class AudioRepairCopilot:
 
     async def repair_stream(self, audio: np.ndarray, stream_name: str, send_to: str):
         """Repair a specific audio stream.
-        
+
         Args:
             audio: The audio data to repair
             stream_name: 'caller' or 'callee' - which stream is being repaired
@@ -208,44 +219,65 @@ class AudioRepairCopilot:
             pcm_duration_sec = len(repaired_pcm) / (self.sample_rate * 2)  # 2 bytes per sample (16-bit)
             logger.info(f"📡 Sending {len(repaired_pcm)} bytes of PCM audio ({pcm_duration_sec:.2f}s) to {send_to}")
 
-            # Chunk audio into 20ms packets (standard RTP packet size)
-            chunk_duration_ms = 20
+            # Use larger chunks (100ms) and remove artificial delays for better audio quality
+            chunk_duration_ms = 100
             bytes_per_ms = (self.sample_rate * 2) // 1000  # 2 bytes per sample, 16-bit
             chunk_size = bytes_per_ms * chunk_duration_ms
             chunks = [repaired_pcm[i:i + chunk_size] for i in range(0, len(repaired_pcm), chunk_size)]
             logger.info(f"📦 Split audio into {len(chunks)} chunks of {chunk_duration_ms}ms each")
 
-            # Inject the repaired audio to the requesting party only, chunk by chunk
+            # Don't await the announcement - let it play concurrently
             try:
-                logger.info(f"🚀 Starting to send {len(chunks)} chunks...")
+                self.call.say("Playing repaired audio", mix_mode=MixMode.DUCK, send_to=send_to)
+                logger.info("📢 Announced repaired audio playback")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to announce: {e}")
+
+            try:
+                logger.info(f"🚀 Sending {len(chunks)} chunks (no delays - SDK handles pacing)...")
                 for i, chunk in enumerate(chunks):
                     if send_to == "caller":
                         self.call.send_audio_to_caller(chunk, mix_mode=MixMode.OVERRIDE)
+                        self.injected_to_caller.append(chunk)
                     else:
                         self.call.send_audio_to_callee(chunk, mix_mode=MixMode.OVERRIDE)
-                    
+                        self.injected_to_callee.append(chunk)
+
                     if i == 0:
                         logger.info(f"✅ Successfully sent first chunk ({len(chunk)} bytes)")
-                    elif (i + 1) % 50 == 0:  # Log every 50 chunks
+                    elif (i + 1) % 10 == 0:  # Log every 10 chunks
                         logger.info(f"📤 Sent {i + 1}/{len(chunks)} chunks...")
-                    
-                    # Small delay between chunks to simulate real-time streaming
-                    if i < len(chunks) - 1:  # Don't delay after last chunk
-                        await asyncio.sleep(chunk_duration_ms / 1000.0)
+
                 logger.info(f"✅ Injected repaired {stream_name} audio to {send_to} ({len(chunks)} chunks)")
             except Exception as audio_error:
                 logger.error(f"❌ Error sending audio: {audio_error}", exc_info=True)
                 raise
 
-            # Save repaired audio for debugging
+            # Save repaired audio for debugging (save the actual 16kHz PCM that was sent)
             repaired_file = RECORDINGS_DIR / f"{self.call.call_id}-{stream_name}-repaired-{self.repair_count}.wav"
-            with open(repaired_file, 'wb') as f:
-                f.write(repaired_wav)
-            logger.debug(f"💾 Saved repaired audio: {repaired_file}")
+            import soundfile as sf
+            # Convert PCM bytes back to float32 for saving
+            repaired_audio_float = np.frombuffer(repaired_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            # Save as 16-bit PCM WAV (universally compatible format)
+            sf.write(repaired_file, repaired_audio_float, self.sample_rate, subtype='PCM_16')
+            logger.debug(f"💾 Saved repaired audio (16kHz, PCM_16): {repaired_file}")
 
         except Exception as e:
             logger.error(f"❌ Failed to repair {stream_name}: {e}", exc_info=True)
             raise
+
+
+def save_pcm_recording(pcm_chunks: list, filename: Path, sample_rate: int) -> None:
+    """Save a list of PCM chunks to a WAV file."""
+    if not pcm_chunks:
+        return
+    
+    import soundfile as sf
+    pcm_bytes = b''.join(pcm_chunks)
+    audio_float = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    sf.write(filename, audio_float, sample_rate, subtype='PCM_16')
+    duration_sec = len(audio_float) / sample_rate
+    logger.info(f"💾 Saved {filename.name}: {duration_sec:.1f}s")
 
 
 @copilot_app(port=COPILOT_PORT)
@@ -254,9 +286,19 @@ async def llmao_repair_copilot(call: CopilotCall):
     copilot = AudioRepairCopilot(call)
 
     try:
-        # Register audio handlers to buffer incoming audio
-        call.on_caller_audio(lambda data: copilot.caller_buffer.add_chunk(data))
-        call.on_callee_audio(lambda data: copilot.callee_buffer.add_chunk(data))
+        # Register audio handlers to buffer incoming audio AND record continuously
+        def handle_caller_audio(data: bytes):
+            copilot.caller_buffer.add_chunk(data)
+            if copilot.recording_enabled:
+                copilot.recording_caller.append(data)
+
+        def handle_callee_audio(data: bytes):
+            copilot.callee_buffer.add_chunk(data)
+            if copilot.recording_enabled:
+                copilot.recording_callee.append(data)
+
+        call.on_caller_audio(handle_caller_audio)
+        call.on_callee_audio(handle_callee_audio)
 
         # Register partial utterance handler to detect trigger phrase
         call.on_partial_utterance(copilot.handle_partial_utterance)
@@ -267,6 +309,14 @@ async def llmao_repair_copilot(call: CopilotCall):
     except Exception as e:
         logger.error(f"❌ Error in copilot: {e}", exc_info=True)
     finally:
+        # Save continuous recordings when call ends
+        if copilot.recording_enabled:
+            logger.info(f"💾 Saving continuous recordings...")
+            save_pcm_recording(copilot.recording_caller, RECORDINGS_DIR / f"{call.call_id}-caller-continuous.wav", copilot.sample_rate)
+            save_pcm_recording(copilot.recording_callee, RECORDINGS_DIR / f"{call.call_id}-callee-continuous.wav", copilot.sample_rate)
+            save_pcm_recording(copilot.injected_to_caller, RECORDINGS_DIR / f"{call.call_id}-injected-to-caller.wav", copilot.sample_rate)
+            save_pcm_recording(copilot.injected_to_callee, RECORDINGS_DIR / f"{call.call_id}-injected-to-callee.wav", copilot.sample_rate)
+
         logger.info(
             f"👋 Call ended: {call.call_id} "
             f"({call.calling_number} → {call.called_number}) - "
