@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use icf_media_sdk::{
     create_copilot_app, AppOptions, CallCleanup, CopilotCallHandle, CopilotMode,
-    MediaHandler, SdkResult, SpeakingParty,
+    MediaHandler, SdkResult, SpeakingParty, CopilotSpeechTarget, MixMode,
 };
 use log::{error, info, warn};
 use regex::Regex;
@@ -48,17 +48,8 @@ impl LLMaoRepairCopilot {
 impl MediaHandler for LLMaoRepairCopilot {
     type Call = CopilotCallHandle;
 
-    async fn on_health_check(
-        &self,
-        request: icf_media_sdk::HealthCheckRequest,
-    ) -> SdkResult<Option<icf_media_sdk::HealthCheckResponse>> {
-        info!("💓 Health check received from region: {}", request.source_region);
-        
-        // Return a response with current timestamp to indicate we're healthy
-        Ok(Some(icf_media_sdk::HealthCheckResponse {
-            response_timestamp: chrono::Utc::now().to_rfc3339(),
-        }))
-    }
+    // Use default health check implementation from SDK
+    // This is equivalent to Python's behavior (no custom handler)
 
     async fn on_call(&self, call: Self::Call) -> SdkResult<Option<CallCleanup>> {
         info!(
@@ -210,6 +201,32 @@ async fn process_and_repair_audio(
         info!("✅ Now bidirectional");
     }
 
+    // Announce we're starting the repair
+    info!("📢 Announcing repair start...");
+    let target = if target_party.as_str() == "caller" {
+        CopilotSpeechTarget::Caller
+    } else {
+        CopilotSpeechTarget::Callee
+    };
+    
+    if let Ok(announcement) = call.say(
+        "Starting audio repair now.",
+        target,
+        Some(MixMode::Override)
+    ) {
+        // Wait for announcement to complete
+        match announcement.await_completion().await {
+            Ok(completion) => {
+                info!("✅ Announced repair start (status: {:?})", completion.status);
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to wait for announcement: {}", e);
+            }
+        }
+    } else {
+        warn!("⚠️ Failed to announce repair start");
+    }
+
     // Get audio samples from buffer
     let samples = {
         let buf = audio_buffer.lock().unwrap();
@@ -227,18 +244,39 @@ async fn process_and_repair_audio(
     let repairer = AudioRepairer::new(backend_url)?;
     let repaired_audio = repairer.repair_audio(&samples).await?;
 
-    info!("🎵 Repaired audio ready, sending to {}", target_party);
+    info!("🎵 Repaired audio ready ({} samples)", repaired_audio.len());
 
-    // Determine target and send audio
+    // Announce we're about to play the repaired audio
+    info!("📢 Announcing repaired audio playback...");
+    if let Ok(announcement) = call.say(
+        "Playing repaired audio",
+        target,
+        Some(MixMode::Override)
+    ) {
+        // Wait for this announcement to finish too
+        match announcement.await_completion().await {
+            Ok(completion) => {
+                info!("✅ Announced playback (status: {:?})", completion.status);
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to wait for playback announcement: {}", e);
+            }
+        }
+    } else {
+        warn!("⚠️ Failed to announce playback");
+    }
+
+    // Now send the repaired audio
+    info!("🔊 Sending repaired audio to {}", target_party);
     let audio_bytes = samples_to_bytes(&repaired_audio);
     
     if target_party.as_str() == "caller" {
-        call.send_audio_to_caller(&audio_bytes, None)?;
+        call.send_audio_to_caller(&audio_bytes, Some(MixMode::Override))?;
     } else {
-        call.send_audio_to_callee(&audio_bytes, None)?;
+        call.send_audio_to_callee(&audio_bytes, Some(MixMode::Override))?;
     }
     
-    info!("🔊 Repaired audio sent");
+    info!("✅ Repaired audio sent successfully");
 
     Ok(())
 }
