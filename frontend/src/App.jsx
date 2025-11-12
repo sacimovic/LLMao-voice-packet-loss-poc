@@ -12,6 +12,16 @@ const tokenizeWords = (text) => {
   return text.trim().split(/\s+/).filter(Boolean)
 }
 
+const normalizeWord = (word) => {
+  // Remove punctuation and convert to lowercase for comparison
+  return word.toLowerCase().replace(/[.,!?;:'"]/g, '')
+}
+
+const wordsMatch = (word1, word2) => {
+  if (!word1 || !word2) return false
+  return normalizeWord(word1) === normalizeWord(word2)
+}
+
 const alignWordPairs = (sourceText, targetText) => {
   const sourceWords = tokenizeWords(sourceText)
   const targetWords = tokenizeWords(targetText)
@@ -22,7 +32,7 @@ const alignWordPairs = (sourceText, targetText) => {
   const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0))
   for (let i = n - 1; i >= 0; i -= 1) {
     for (let j = m - 1; j >= 0; j -= 1) {
-      dp[i][j] = sourceWords[i] === targetWords[j]
+      dp[i][j] = wordsMatch(sourceWords[i], targetWords[j])
         ? dp[i + 1][j + 1] + 1
         : Math.max(dp[i + 1][j], dp[i][j + 1])
     }
@@ -35,7 +45,7 @@ const alignWordPairs = (sourceText, targetText) => {
     const sourceWord = i < n ? sourceWords[i] : null
     const targetWord = j < m ? targetWords[j] : null
     if (sourceWord && targetWord) {
-      if (sourceWord === targetWord) {
+      if (wordsMatch(sourceWord, targetWord)) {
         pairs.push({ degraded: sourceWord, repaired: targetWord, match: true })
         i += 1
         j += 1
@@ -273,13 +283,15 @@ export default function App() {
     form.append('file', file)
     form.append('degrade_mode', degradeMode)
     if (degradeMode === 'window') {
-      form.append('degrade_percent', '0')
+      // Window mode: zero out specific time window
+      form.append('degrade_percent', '0')  // Not used in window mode
       form.append('window_ms', windowMs.toString())
       form.append('window_start_ms', windowStartMs.toString())
     } else {
+      // Random packet loss mode
       form.append('degrade_percent', degrade.toString())
-      form.append('window_ms', windowMs.toString())
-      form.append('window_start_ms', windowStartMs.toString())
+      form.append('window_ms', '0')
+      form.append('window_start_ms', '0')
     }
     form.append('whisper_model', 'base')
     form.append('repair_model', 'google/flan-t5-small')

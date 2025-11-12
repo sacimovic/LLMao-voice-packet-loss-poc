@@ -18,7 +18,6 @@ mod tts;
 
 use asr::WhisperModel;
 use audio::load_audio_mono_16k;
-use degradation::degrade_audio;
 use repair::BedrockRepair;
 use tts::TTSEngine;
 
@@ -77,6 +76,9 @@ async fn process_audio(
 ) -> Result<Json<ProcessResponse>, StatusCode> {
     let mut audio_bytes = None;
     let mut degrade_percent = 30;
+    let mut degrade_mode = String::from("percentage");
+    let mut window_ms = 0u32;
+    let mut window_start_ms = 0u32;
 
     while let Some(field) = multipart.next_field().await.unwrap() {
         let name = field.name().unwrap_or("").to_string();
@@ -90,6 +92,21 @@ async fn process_audio(
                     degrade_percent = text.parse().unwrap_or(30);
                 }
             }
+            "degrade_mode" => {
+                if let Ok(text) = field.text().await {
+                    degrade_mode = text;
+                }
+            }
+            "window_ms" => {
+                if let Ok(text) = field.text().await {
+                    window_ms = text.parse().unwrap_or(0);
+                }
+            }
+            "window_start_ms" => {
+                if let Ok(text) = field.text().await {
+                    window_start_ms = text.parse().unwrap_or(0);
+                }
+            }
             _ => {}
         }
     }
@@ -99,7 +116,13 @@ async fn process_audio(
     let original_audio = load_audio_mono_16k(&audio_bytes)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let degraded = degrade_audio(&original_audio, degrade_percent as f32);
+    let degraded = if degrade_mode == "window" {
+        println!("Using window degradation: start={}ms, length={}ms", window_start_ms, window_ms);
+        degradation::degrade_audio_window(&original_audio, window_start_ms, window_ms)
+    } else {
+        println!("Using random degradation: {}%", degrade_percent);
+        degradation::degrade_audio_random(&original_audio, degrade_percent as f32)
+    };
 
     info!("Running Whisper ASR...");
     let asr_text = state.whisper.transcribe(&degraded)
@@ -120,15 +143,15 @@ async fn process_audio(
 
     info!("Calling AWS Polly for TTS...");
     info!("Text to synthesize: {}", repaired_text);
-    let tts_audio = state.tts.synthesize(&repaired_text, Some(&audio_bytes)).await
+    let (tts_audio, tts_sample_rate) = state.tts.synthesize(&repaired_text, Some(&audio_bytes)).await
         .map_err(|e| {
             eprintln!("TTS failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    info!("TTS complete. Generated {} samples", tts_audio.len());
+    info!("TTS complete. Generated {} samples at {}Hz", tts_audio.len(), tts_sample_rate);
 
-    let degraded_wav = encode_wav_base64(&degraded);
-    let repaired_wav = encode_wav_base64(&tts_audio);
+    let degraded_wav = encode_wav_base64(&degraded, 16000);
+    let repaired_wav = encode_wav_base64(&tts_audio, 16000);
 
     Ok(Json(ProcessResponse {
         asr_text,
@@ -138,13 +161,13 @@ async fn process_audio(
     }))
 }
 
-fn encode_wav_base64(samples: &[f32]) -> String {
+fn encode_wav_base64(samples: &[f32], sample_rate: u32) -> String {
     use hound::{WavSpec, WavWriter};
     use std::io::Cursor;
 
     let spec = WavSpec {
         channels: 1,
-        sample_rate: 16000,
+        sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
