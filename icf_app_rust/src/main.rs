@@ -12,9 +12,12 @@ use tokio::{signal, fs};
 
 mod audio_buffer;
 mod audio_repair;
+mod audio_degradation;
 
 use audio_buffer::AudioBuffer;
 use audio_repair::AudioRepairer;
+
+use audio_degradation::AudioDegradationDetector;
 
 const COPILOT_PORT: u16 = 8084;
 const BUFFER_DURATION_MS: u64 = 5000; // Keep last 5 seconds of audio
@@ -68,6 +71,17 @@ impl MediaHandler for LLMaoRepairCopilot {
         // Audio buffers for both parties
         let caller_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate as usize, BUFFER_DURATION_MS)));
         let callee_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate as usize, BUFFER_DURATION_MS)));
+
+        let degradation_detector = Arc::new(AudioDegradationDetector::new(
+            Box::new({
+                let call_ref = Arc::clone(&call);
+                move |party, _time| {
+                    log::warn!("🔔 Auto-detected degradation on {}", party);
+                    // TODO: Implement your desired action here
+                }
+            }),
+            Some(5000.0), // 5 second alert interval
+        ));
         
         let backend_url = self.backend_url.clone();
         let is_processing = Arc::new(Mutex::new(false));
@@ -83,6 +97,7 @@ impl MediaHandler for LLMaoRepairCopilot {
         call.on_audio(Some({
             let caller_buf = Arc::clone(&caller_buffer);
             let callee_buf = Arc::clone(&callee_buffer);
+            let detector = Arc::clone(&degradation_detector);
             
             Arc::new(move |audio_bytes, speaking_party| {
                 // Convert bytes to i16 samples (little-endian PCM)
@@ -97,11 +112,13 @@ impl MediaHandler for LLMaoRepairCopilot {
                         if let Ok(mut buf) = caller_buf.lock() {
                             buf.add_samples(&samples);
                         }
+                        detector.process_chunk(audio_bytes, SpeakingParty::Caller);
                     }
                     icf_media_sdk::SpeakingParty::Callee => {
                         if let Ok(mut buf) = callee_buf.lock() {
                             buf.add_samples(&samples);
                         }
+                        detector.process_chunk(audio_bytes, SpeakingParty::Callee);
                     }
                 }
             })
@@ -209,23 +226,27 @@ async fn process_and_repair_audio(
         CopilotSpeechTarget::Callee
     };
     
-    if let Ok(announcement) = call.say(
+    if let Err(e) = call.say(
         "Starting audio repair now.",
         target,
         Some(MixMode::Override)
-    ) {
-        // Wait for announcement to complete
-        match announcement.await_completion().await {
-            Ok(completion) => {
-                info!("✅ Announced repair start (status: {:?})", completion.status);
-            }
-            Err(e) => {
-                warn!("⚠️ Failed to wait for announcement: {}", e);
-            }
+     ) {
+            warn!("⚠️ Failed to announce repair start: {}", e);
+        } else {
+            info!("✅ Announced repair start");
         }
-    } else {
-        warn!("⚠️ Failed to announce repair start");
-    }
+    //     // Wait for announcement to complete
+    //     match announcement.await_completion().await {
+    //         Ok(completion) => {
+    //             info!("✅ Announced repair start (status: {:?})", completion.status);
+    //         }
+    //         Err(e) => {
+    //             warn!("⚠️ Failed to wait for announcement: {}", e);
+    //         }
+    //     }
+    // } else {
+    //     warn!("⚠️ Failed to announce repair start");
+    // }
 
     // Get audio samples from buffer
     let samples = {
@@ -248,22 +269,23 @@ async fn process_and_repair_audio(
 
     // Announce we're about to play the repaired audio
     info!("📢 Announcing repaired audio playback...");
-    if let Ok(announcement) = call.say(
+    if let Err(e) = call.say(
         "Playing repaired audio",
         target,
         Some(MixMode::Override)
     ) {
-        // Wait for this announcement to finish too
-        match announcement.await_completion().await {
-            Ok(completion) => {
-                info!("✅ Announced playback (status: {:?})", completion.status);
-            }
-            Err(e) => {
-                warn!("⚠️ Failed to wait for playback announcement: {}", e);
-            }
-        }
+        warn!("⚠️ Failed to announce playback: {}", e);
+        // // Wait for this announcement to finish too
+        // match announcement.await_completion().await {
+        //     Ok(completion) => {
+        //         info!("✅ Announced playback (status: {:?})", completion.status);
+        //     }
+        //     Err(e) => {
+        //         warn!("⚠️ Failed to wait for playback announcement: {}", e);
+        //     }
+        // }
     } else {
-        warn!("⚠️ Failed to announce playback");
+        info!("✅ Announced playback");
     }
 
     // Now send the repaired audio
