@@ -12,6 +12,16 @@ const tokenizeWords = (text) => {
   return text.trim().split(/\s+/).filter(Boolean)
 }
 
+const normalizeWord = (word) => {
+  // Remove punctuation and convert to lowercase for comparison
+  return word.toLowerCase().replace(/[.,!?;:'"]/g, '')
+}
+
+const wordsMatch = (word1, word2) => {
+  if (!word1 || !word2) return false
+  return normalizeWord(word1) === normalizeWord(word2)
+}
+
 const alignWordPairs = (sourceText, targetText) => {
   const sourceWords = tokenizeWords(sourceText)
   const targetWords = tokenizeWords(targetText)
@@ -22,7 +32,7 @@ const alignWordPairs = (sourceText, targetText) => {
   const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0))
   for (let i = n - 1; i >= 0; i -= 1) {
     for (let j = m - 1; j >= 0; j -= 1) {
-      dp[i][j] = sourceWords[i] === targetWords[j]
+      dp[i][j] = wordsMatch(sourceWords[i], targetWords[j])
         ? dp[i + 1][j + 1] + 1
         : Math.max(dp[i + 1][j], dp[i][j + 1])
     }
@@ -35,7 +45,7 @@ const alignWordPairs = (sourceText, targetText) => {
     const sourceWord = i < n ? sourceWords[i] : null
     const targetWord = j < m ? targetWords[j] : null
     if (sourceWord && targetWord) {
-      if (sourceWord === targetWord) {
+      if (wordsMatch(sourceWord, targetWord)) {
         pairs.push({ degraded: sourceWord, repaired: targetWord, match: true })
         i += 1
         j += 1
@@ -85,7 +95,6 @@ export default function App() {
   const [statusPhase, setStatusPhase] = useState('idle')
   const [elapsedMs, setElapsedMs] = useState(null)
 
-  const statusTimers = useRef([])
   const processingStartRef = useRef(null)
   const objectUrlsRef = useRef({ original: null, degraded: null, tts: null, combined: null })
 
@@ -150,22 +159,7 @@ export default function App() {
   const flaggedTokenCount = Math.max(diffCounts.wrong, diffCounts.insertions)
   const correctedTokenCount = Math.max(diffCounts.insertions, diffCounts.wrong)
 
-  const scheduleStatusTimeline = () => {
-    statusTimers.current.forEach(clearTimeout)
-    statusTimers.current = []
-    const steps = [
-      { delay: 0, message: 'Uploading audio & simulating packet loss…' },
-      { delay: 1500, message: 'Running Whisper transcription on degraded signal…' },
-      { delay: 3500, message: 'Repairing transcript with local FLAN-T5…' },
-      { delay: 5500, message: 'Rebuilding speech with XTTS voice cloning…' }
-    ]
-    statusTimers.current = steps.map(({ delay, message }) => (
-      setTimeout(() => setStatusMessage(message), delay)
-    ))
-  }
-
   useEffect(() => () => {
-    statusTimers.current.forEach(clearTimeout)
     Object.values(objectUrlsRef.current).forEach((url) => url && URL.revokeObjectURL(url))
   }, [])
 
@@ -214,8 +208,6 @@ export default function App() {
     const selected = e.target.files[0]
     setFile(selected)
     if (selected) {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       updateUrl(setOriginalUrl, 'original', URL.createObjectURL(selected))
       setStatusPhase('idle')
       setStatusMessage('Ready to process the selected audio.')
@@ -229,8 +221,6 @@ export default function App() {
       updateUrl(setTtsUrl, 'tts', null)
       updateUrl(setCombinedUrl, 'combined', null)
     } else {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       updateUrl(setOriginalUrl, 'original', null)
       setAsrText('')
       setRepairedText('')
@@ -264,22 +254,23 @@ export default function App() {
     updateUrl(setTtsUrl, 'tts', null)
     updateUrl(setCombinedUrl, 'combined', null)
     setStatusPhase('processing')
-    setStatusMessage('Uploading audio & simulating packet loss…')
+  setStatusMessage('Processing audio on backend...')
     setElapsedMs(null)
     processingStartRef.current = performance.now()
-    scheduleStatusTimeline()
 
     const form = new FormData()
     form.append('file', file)
     form.append('degrade_mode', degradeMode)
     if (degradeMode === 'window') {
-      form.append('degrade_percent', '0')
+      // Window mode: zero out specific time window
+      form.append('degrade_percent', '0')  // Not used in window mode
       form.append('window_ms', windowMs.toString())
       form.append('window_start_ms', windowStartMs.toString())
     } else {
+      // Random packet loss mode
       form.append('degrade_percent', degrade.toString())
-      form.append('window_ms', windowMs.toString())
-      form.append('window_start_ms', windowStartMs.toString())
+      form.append('window_ms', '0')
+      form.append('window_start_ms', '0')
     }
     form.append('whisper_model', 'base')
     form.append('repair_model', 'google/flan-t5-small')
@@ -314,8 +305,6 @@ export default function App() {
       setStatusPhase('error')
       setStatusMessage(message)
     } finally {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       setLoading(false)
     }
   }
@@ -559,7 +548,7 @@ export default function App() {
               ) : (
                 flaggedTokenCount
                   ? `${flaggedTokenCount} tokens flagged for repair`
-                  : 'Transcript analysis will appear after processing.'
+                  : 'Degraded audio simulation will show here once processing finishes.'
               )}
             </p>
           </div>

@@ -6,9 +6,9 @@
     Router,
 };
 use serde::Serialize;
-use std::{env, sync::Arc};
+use std::{env, path::Path, sync::Arc};
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 mod asr;
 mod audio;
@@ -17,10 +17,14 @@ mod repair;
 mod tts;
 
 use asr::WhisperModel;
-use audio::load_audio_mono_16k;
 use degradation::{degrade_audio, degrade_audio_window};
+use audio::{compress_silence, load_audio_mono_16k};
 use repair::BedrockRepair;
 use tts::TTSEngine;
+
+const SAMPLE_RATE: u32 = 16_000;
+const MIN_ASR_SAMPLES: usize = (SAMPLE_RATE as usize) / 5;
+
 
 #[derive(Clone)]
 struct AppState {
@@ -46,8 +50,47 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     info!("Loading models...");
-    
-    let whisper = Arc::new(WhisperModel::new("models/ggml-base.bin")?);
+
+    let candidate_models = [
+        ("models/ggml-tiny.en-q5_1.bin", "tiny.en-q5_1"),
+        ("models/ggml-tiny.bin", "tiny"),
+        ("models/ggml-base.bin", "base"),
+    ];
+
+    let (model_path, model_label) = match env::var("WHISPER_MODEL_PATH") {
+        Ok(path) => {
+            info!("Whisper model path provided via WHISPER_MODEL_PATH={}", path);
+            (path, "custom")
+        }
+        Err(_) => {
+            let found = candidate_models
+                .iter()
+                .find(|(path, _)| Path::new(path).exists())
+                .map(|(path, label)| ((*path).to_string(), *label));
+
+            match found {
+                Some((path, label)) => {
+                    if label != "tiny" && label != "tiny.en-q5_1" {
+                        warn!(
+                            "Falling back to {} Whisper model because no tiny models were found.",
+                            label
+                        );
+                    }
+                    (path, label)
+                }
+                None => {
+                    warn!(
+                        "No Whisper models found in ./models. Please download ggml-tiny.en-q5_1.bin or ggml-tiny.bin."
+                    );
+                    ("models/ggml-base.bin".to_string(), "base")
+                }
+            }
+        }
+    };
+
+    info!("Loading Whisper {:?} model from {}", model_label, model_path);
+
+    let whisper = Arc::new(WhisperModel::new(&model_path)?);
     info!("Whisper model loaded successfully");
     
     let repair = Arc::new(BedrockRepair::new().await?);
@@ -81,8 +124,8 @@ async fn process_audio(
     let mut audio_bytes = None;
     let mut degrade_percent = 30;
     let mut degrade_mode = String::from("percentage");
-    let mut window_ms = 40;
-    let mut window_start_ms = 0;
+    let mut window_ms = 40u32;
+    let mut window_start_ms = 0u32;
 
     while let Some(field) = multipart.next_field().await.unwrap() {
         let name = field.name().unwrap_or("").to_string();
@@ -104,6 +147,7 @@ async fn process_audio(
             "window_ms" => {
                 if let Ok(text) = field.text().await {
                     window_ms = text.parse().unwrap_or(40);
+                    window_ms = text.parse().unwrap_or(0);
                 }
             }
             "window_start_ms" => {
@@ -121,19 +165,51 @@ async fn process_audio(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let degraded = if degrade_mode == "window" {
-        info!("Using window degradation: {}ms window at {}ms", window_ms, window_start_ms);
-        degrade_audio_window(&original_audio, window_start_ms, window_ms)
+        println!("Using window degradation: start={}ms, length={}ms", window_start_ms, window_ms);
+        degradation::degrade_audio_window(&original_audio, window_start_ms, window_ms)
     } else {
-        info!("Using percentage degradation: {}%", degrade_percent);
-        degrade_audio(&original_audio, degrade_percent as f32)
+        println!("Using random degradation: {}%", degrade_percent);
+        degradation::degrade_audio_random(&original_audio, degrade_percent as f32)
     };
 
+    let trimmed = compress_silence(&degraded, SAMPLE_RATE);
+    let (asr_audio, trimmed_used) = if let Some(ref trimmed_audio) = trimmed {
+        if trimmed_audio.len() >= MIN_ASR_SAMPLES {
+            (trimmed_audio.as_slice(), true)
+        } else {
+            (&degraded[..], false)
+        }
+    } else {
+        (&degraded[..], false)
+    };
+
+    let degraded_seconds = degraded.len() as f32 / SAMPLE_RATE as f32;
+    let asr_seconds = asr_audio.len() as f32 / SAMPLE_RATE as f32;
+    if trimmed_used {
+        info!(
+            "Trimmed silence for ASR: {:.2}s -> {:.2}s",
+            degraded_seconds, asr_seconds
+        );
+    } else {
+        info!("Using full audio for ASR: {:.2}s", asr_seconds);
+    }
+
     info!("Running Whisper ASR...");
-    let asr_text = state.whisper.transcribe(&degraded)
-        .map_err(|e| {
-            eprintln!("ASR error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let asr_text_result = state.whisper.transcribe(asr_audio);
+    let asr_text = match asr_text_result {
+        Ok(text) => text,
+        Err(err) if trimmed_used => {
+            warn!("Trimmed ASR failed ({}). Retrying with full audio", err);
+            state.whisper.transcribe(&degraded).map_err(|fallback_err| {
+                eprintln!("ASR error after fallback: {}", fallback_err);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+        }
+        Err(err) => {
+            eprintln!("ASR error: {}", err);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
     info!("ASR result: {}", asr_text);
 
     info!("Calling Bedrock API for text repair...");
@@ -147,15 +223,15 @@ async fn process_audio(
 
     info!("Calling AWS Polly for TTS...");
     info!("Text to synthesize: {}", repaired_text);
-    let tts_audio = state.tts.synthesize(&repaired_text, Some(&audio_bytes)).await
+    let (tts_audio, tts_sample_rate) = state.tts.synthesize(&repaired_text, Some(&audio_bytes)).await
         .map_err(|e| {
             eprintln!("TTS failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    info!("TTS complete. Generated {} samples", tts_audio.len());
+    info!("TTS complete. Generated {} samples at {}Hz", tts_audio.len(), tts_sample_rate);
 
-    let degraded_wav = encode_wav_base64(&degraded);
-    let repaired_wav = encode_wav_base64(&tts_audio);
+    let degraded_wav = encode_wav_base64(&degraded, SAMPLE_RATE);
+    let repaired_wav = encode_wav_base64(&tts_audio, SAMPLE_RATE);
     let combined_wav = repaired_wav.clone();
 
     Ok(Json(ProcessResponse {
@@ -169,13 +245,13 @@ async fn process_audio(
     }))
 }
 
-fn encode_wav_base64(samples: &[f32]) -> String {
+fn encode_wav_base64(samples: &[f32], sample_rate: u32) -> String {
     use hound::{WavSpec, WavWriter};
     use std::io::Cursor;
 
     let spec = WavSpec {
         channels: 1,
-        sample_rate: 16000,
+        sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };

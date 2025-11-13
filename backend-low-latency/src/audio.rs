@@ -64,6 +64,62 @@ pub fn load_audio_mono_16k(bytes: &[u8]) -> Result<Vec<f32>> {
     Ok(all_samples)
 }
 
+pub fn compress_silence(samples: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let window = (sample_rate as usize / 100).max(1);
+    let threshold = 0.012f32;
+    let pre_expand = 2usize;
+    let post_expand = 6usize;
+
+    let total_windows = (samples.len() + window - 1) / window;
+    let mut keep = vec![false; total_windows];
+
+    for w in 0..total_windows {
+        let start = w * window;
+        let end = ((w + 1) * window).min(samples.len());
+        let chunk = &samples[start..end];
+        if chunk.is_empty() {
+            continue;
+        }
+        let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+        if rms >= threshold {
+            keep[w] = true;
+        }
+    }
+
+    if !keep.iter().any(|&k| k) {
+        return None;
+    }
+
+    for w in 0..total_windows {
+        if keep[w] {
+            let start = w.saturating_sub(pre_expand);
+            let end = (w + post_expand + 1).min(total_windows);
+            for idx in start..end {
+                keep[idx] = true;
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(samples.len());
+    for w in 0..total_windows {
+        if keep[w] {
+            let start = w * window;
+            let end = ((w + 1) * window).min(samples.len());
+            output.extend_from_slice(&samples[start..end]);
+        }
+    }
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
+
 fn resample(samples: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
     if from_sr == to_sr {
         return samples.to_vec();
