@@ -95,7 +95,6 @@ export default function App() {
   const [statusPhase, setStatusPhase] = useState('idle')
   const [elapsedMs, setElapsedMs] = useState(null)
 
-  const statusTimers = useRef([])
   const processingStartRef = useRef(null)
   const objectUrlsRef = useRef({ original: null, degraded: null, tts: null, combined: null })
 
@@ -160,22 +159,7 @@ export default function App() {
   const flaggedTokenCount = Math.max(diffCounts.wrong, diffCounts.insertions)
   const correctedTokenCount = Math.max(diffCounts.insertions, diffCounts.wrong)
 
-  const scheduleStatusTimeline = () => {
-    statusTimers.current.forEach(clearTimeout)
-    statusTimers.current = []
-    const steps = [
-      { delay: 0, message: 'Uploading audio & simulating packet loss…' },
-      { delay: 1500, message: 'Running Whisper transcription on degraded signal…' },
-      { delay: 3500, message: 'Repairing transcript with local FLAN-T5…' },
-      { delay: 5500, message: 'Rebuilding speech with XTTS voice cloning…' }
-    ]
-    statusTimers.current = steps.map(({ delay, message }) => (
-      setTimeout(() => setStatusMessage(message), delay)
-    ))
-  }
-
   useEffect(() => () => {
-    statusTimers.current.forEach(clearTimeout)
     Object.values(objectUrlsRef.current).forEach((url) => url && URL.revokeObjectURL(url))
   }, [])
 
@@ -224,8 +208,6 @@ export default function App() {
     const selected = e.target.files[0]
     setFile(selected)
     if (selected) {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       updateUrl(setOriginalUrl, 'original', URL.createObjectURL(selected))
       setStatusPhase('idle')
       setStatusMessage('Ready to process the selected audio.')
@@ -239,8 +221,6 @@ export default function App() {
       updateUrl(setTtsUrl, 'tts', null)
       updateUrl(setCombinedUrl, 'combined', null)
     } else {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       updateUrl(setOriginalUrl, 'original', null)
       setAsrText('')
       setRepairedText('')
@@ -274,10 +254,9 @@ export default function App() {
     updateUrl(setTtsUrl, 'tts', null)
     updateUrl(setCombinedUrl, 'combined', null)
     setStatusPhase('processing')
-    setStatusMessage('Uploading audio & simulating packet loss…')
+  setStatusMessage('Processing audio on backend...')
     setElapsedMs(null)
     processingStartRef.current = performance.now()
-    scheduleStatusTimeline()
 
     const form = new FormData()
     form.append('file', file)
@@ -326,8 +305,6 @@ export default function App() {
       setStatusPhase('error')
       setStatusMessage(message)
     } finally {
-      statusTimers.current.forEach(clearTimeout)
-      statusTimers.current = []
       setLoading(false)
     }
   }
@@ -571,7 +548,7 @@ export default function App() {
               ) : (
                 flaggedTokenCount
                   ? `${flaggedTokenCount} tokens flagged for repair`
-                  : 'Transcript analysis will appear after processing.'
+                  : 'Degraded audio simulation will show here once processing finishes.'
               )}
             </p>
           </div>
