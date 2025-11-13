@@ -9,10 +9,15 @@ use crate::audio_buffer::AudioBuffer;
 use crate::audio_repair::AudioRepairer;
 
 // Configuration
-const MIN_REPAIR_DURATION_S: f64 = 3.0;
+#[allow(dead_code)]
+const TARGET_REPAIR_DURATION_S: f64 = 10.0;  // Always use 10 second buffers
+#[allow(dead_code)]
 const MIN_SPEECH_ENERGY: f32 = 0.01;
+#[allow(dead_code)]
 const SILENCE_TIMEOUT_S: f64 = 2.0;  // How long to wait after silence before finalizing
+#[allow(dead_code)]
 const SEGMENT_GAP_THRESHOLD_S: f64 = 2.0;
+#[allow(dead_code)]
 const REPAIRED_SEGMENT_TTL_S: f64 = 30.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +35,7 @@ impl std::fmt::Display for StreamType {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct RepairedSegment {
     pub audio_pcm: Vec<i16>,
@@ -38,6 +44,7 @@ pub struct RepairedSegment {
     pub stream: StreamType,
 }
 
+#[allow(dead_code)]
 impl RepairedSegment {
     pub fn duration_s(&self) -> f64 {
         self.end_time.duration_since(self.start_time).as_secs_f64()
@@ -48,6 +55,7 @@ impl RepairedSegment {
     }
 }
 
+#[allow(dead_code)]
 pub struct BackgroundRepairState {
     is_active_caller: AtomicBool,
     is_active_callee: AtomicBool,
@@ -58,6 +66,7 @@ pub struct BackgroundRepairState {
     callee_audio_tx: Mutex<Option<mpsc::UnboundedSender<Vec<i16>>>>,
 }
 
+#[allow(dead_code)]
 impl BackgroundRepairState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -258,6 +267,7 @@ impl BackgroundRepairState {
     }
 }
 
+#[allow(dead_code)]
 async fn background_repair_task(
     stream: StreamType,
     mut audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
@@ -271,6 +281,13 @@ async fn background_repair_task(
     let mut last_speech_time: Option<Instant> = None;
     
     loop {
+        // Check if we've accumulated 10 seconds of audio
+        let current_duration_s = accumulated_audio.len() as f64 / 16000.0;
+        if current_duration_s >= TARGET_REPAIR_DURATION_S {
+            info!("✅ [{}] Reached target duration of {:.1}s", stream, TARGET_REPAIR_DURATION_S);
+            break;
+        }
+        
         // Wait for audio chunks or timeout
         match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
             Ok(Some(chunk)) => {
@@ -319,9 +336,8 @@ async fn background_repair_task(
     // Process the accumulated audio
     let duration_s = accumulated_audio.len() as f64 / 16000.0;
     
-    if duration_s < MIN_REPAIR_DURATION_S {
-        info!("ℹ️ [{}] Not enough audio accumulated ({:.1}s < {:.1}s minimum)", 
-              stream, duration_s, MIN_REPAIR_DURATION_S);
+    if accumulated_audio.is_empty() {
+        info!("ℹ️ [{}] No audio accumulated", stream);
         state.set_active(stream, false);
         info!("🏁 [{}] Background repair task finished", stream);
         return;
@@ -354,6 +370,7 @@ async fn background_repair_task(
     info!("🏁 [{}] Background repair task finished", stream);
 }
 
+#[allow(dead_code)]
 fn calculate_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 use super::types::*;
 
+#[allow(dead_code)]
 pub struct StreamAnalyzer {
     party: SpeakingParty,
     state: StreamState,
@@ -18,6 +19,7 @@ pub struct StreamAnalyzer {
     chunk_counter: usize,
 }
 
+#[allow(dead_code)]
 impl StreamAnalyzer {
     pub fn new(party: SpeakingParty) -> Self {
         Self {
@@ -142,6 +144,7 @@ impl StreamAnalyzer {
 }
 
 /// Convert little-endian PCM bytes to normalized f32 samples
+#[allow(dead_code)]
 fn bytes_to_samples(chunk_bytes: &[u8]) -> Vec<f32> {
     chunk_bytes
         .chunks_exact(2)
@@ -153,6 +156,7 @@ fn bytes_to_samples(chunk_bytes: &[u8]) -> Vec<f32> {
 }
 
 /// Calculate RMS energy
+#[allow(dead_code)]
 fn calculate_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;

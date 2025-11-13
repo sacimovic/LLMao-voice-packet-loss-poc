@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use super::types::*;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct GapRecord {
     time: Instant,
@@ -10,6 +11,7 @@ struct GapRecord {
     confidence: f32,
 }
 
+#[allow(dead_code)]
 pub struct GapValidator {
     callback: RepairCallback,
     recent_gaps_caller: VecDeque<GapRecord>,
@@ -20,6 +22,7 @@ pub struct GapValidator {
     pattern_window: Duration,
 }
 
+#[allow(dead_code)]
 impl GapValidator {
     pub fn new(callback: RepairCallback, alert_interval_ms: f64) -> Self {
         let now = Instant::now();
@@ -78,6 +81,7 @@ impl GapValidator {
 }
 
 // Make this a free function to avoid borrow checker issues
+#[allow(dead_code)]
 fn has_degradation_pattern(
     recent_gaps: &VecDeque<GapRecord>,
     current_time: Instant,

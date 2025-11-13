@@ -18,11 +18,10 @@ mod background_repair;
 use audio_buffer::AudioBuffer;
 use audio_repair::AudioRepairer;
 
-use audio_degradation::AudioDegradationDetector;
-use background_repair::{BackgroundRepairState, StreamType};
+use background_repair::StreamType;
 
 const COPILOT_PORT: u16 = 8084;
-const BUFFER_DURATION_MS: u64 = 5000; // Keep last 5 seconds of audio
+const BUFFER_DURATION_MS: u64 = 10000; // Keep last 10 seconds of audio
 
 // Trigger phrases to activate audio repair
 static TRIGGER_PATTERNS: &[&str] = &[
@@ -74,8 +73,6 @@ impl MediaHandler for LLMaoRepairCopilot {
         let caller_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate as usize, BUFFER_DURATION_MS)));
         let callee_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate as usize, BUFFER_DURATION_MS)));
 
-        // Background repair state
-        let background_state = BackgroundRepairState::new();
         let audio_repairer = match AudioRepairer::new(self.backend_url.clone()) {
             Ok(repairer) => Arc::new(repairer),
             Err(e) => {
@@ -88,28 +85,6 @@ impl MediaHandler for LLMaoRepairCopilot {
                 }));
             }
         };
-
-        let degradation_detector = Arc::new(AudioDegradationDetector::new(
-            Box::new({
-                let state = Arc::clone(&background_state);
-                let caller_buf = Arc::clone(&caller_buffer);
-                let callee_buf = Arc::clone(&callee_buffer);
-                let repairer = Arc::clone(&audio_repairer);
-                move |party, _time| {
-                    log::warn!("🔔 Auto-detected degradation on {}", party);
-                    let stream = match party {
-                        SpeakingParty::Caller => StreamType::Caller,
-                        SpeakingParty::Callee => StreamType::Callee,
-                    };
-                    let buffer = match stream {
-                        StreamType::Caller => Arc::clone(&caller_buf),
-                        StreamType::Callee => Arc::clone(&callee_buf),
-                    };
-                    state.start_repair_if_needed(stream, buffer, Arc::clone(&repairer));
-                }
-            }),
-            Some(5000.0), // 5 second alert interval
-        ));
         
         let is_processing = Arc::new(Mutex::new(false));
         let repair_count = Arc::new(Mutex::new(0));
@@ -120,40 +95,49 @@ impl MediaHandler for LLMaoRepairCopilot {
             .filter_map(|pattern| Regex::new(pattern).ok())
             .collect();
 
-        // Handle audio data
-        call.on_audio(Some({
+        // Handle audio data from both parties separately
+        call.on_caller_audio(Some({
             let caller_buf = Arc::clone(&caller_buffer);
-            let callee_buf = Arc::clone(&callee_buffer);
-            let detector = Arc::clone(&degradation_detector);
-            let bg_state = Arc::clone(&background_state);
             
-            Arc::new(move |audio_bytes, speaking_party| {
+            Arc::new(move |audio_bytes| {
                 // Convert bytes to i16 samples (little-endian PCM)
                 let samples: Vec<i16> = audio_bytes
                     .chunks_exact(2)
                     .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect();
                 
-                // Add audio to appropriate buffer based on party
-                match speaking_party {
-                    icf_media_sdk::SpeakingParty::Caller => {
-                        if let Ok(mut buf) = caller_buf.lock() {
-                            buf.add_samples(&samples);
-                        }
-                        detector.process_chunk(audio_bytes, SpeakingParty::Caller);
-                        
-                        // Send to background repair task if active
-                        bg_state.send_audio_chunk(StreamType::Caller, samples);
-                    }
-                    icf_media_sdk::SpeakingParty::Callee => {
-                        if let Ok(mut buf) = callee_buf.lock() {
-                            buf.add_samples(&samples);
-                        }
-                        detector.process_chunk(audio_bytes, SpeakingParty::Callee);
-                        
-                        // Send to background repair task if active
-                        bg_state.send_audio_chunk(StreamType::Callee, samples);
-                    }
+                // Debug: Log every 100 chunks
+                static CALLER_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let count = CALLER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count % 100 == 0 {
+                    info!("🎤 Received CALLER audio chunk {} ({} samples)", count, samples.len());
+                }
+                
+                if let Ok(mut buf) = caller_buf.lock() {
+                    buf.add_samples(&samples);
+                }
+            })
+        }));
+
+        call.on_callee_audio(Some({
+            let callee_buf = Arc::clone(&callee_buffer);
+            
+            Arc::new(move |audio_bytes| {
+                // Convert bytes to i16 samples (little-endian PCM)
+                let samples: Vec<i16> = audio_bytes
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                
+                // Debug: Log every 100 chunks
+                static CALLEE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let count = CALLEE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count % 100 == 0 {
+                    info!("🎤 Received CALLEE audio chunk {} ({} samples)", count, samples.len());
+                }
+                
+                if let Ok(mut buf) = callee_buf.lock() {
+                    buf.add_samples(&samples);
                 }
             })
         }));
@@ -161,7 +145,9 @@ impl MediaHandler for LLMaoRepairCopilot {
         // Handle partial utterances to detect trigger phrase
         call.on_partial_utterance(Some({
             let call_ref = Arc::clone(&call);
-            let bg_state = Arc::clone(&background_state);
+            let caller_buf = Arc::clone(&caller_buffer);
+            let callee_buf = Arc::clone(&callee_buffer);
+            let repairer = Arc::clone(&audio_repairer);
             let processing_flag = Arc::clone(&is_processing);
             let count = Arc::clone(&repair_count);
             
@@ -199,16 +185,23 @@ impl MediaHandler for LLMaoRepairCopilot {
                         SpeakingParty::Callee => CopilotSpeechTarget::Callee,
                     };
 
+                    // Get the appropriate buffer
+                    let buffer = match target_stream {
+                        StreamType::Caller => Arc::clone(&caller_buf),
+                        StreamType::Callee => Arc::clone(&callee_buf),
+                    };
+
                     // Spawn repair task
                     let call_clone = Arc::clone(&call_ref);
-                    let state = Arc::clone(&bg_state);
+                    let repairer_clone = Arc::clone(&repairer);
                     let processing = Arc::clone(&processing_flag);
                     let repair_count = Arc::clone(&count);
 
                     tokio::spawn(async move {
                         match handle_repair_request(
                             Arc::clone(&call_clone),
-                            state,
+                            buffer,
+                            repairer_clone,
                             target_stream,
                             send_to,
                         ).await {
@@ -229,15 +222,6 @@ impl MediaHandler for LLMaoRepairCopilot {
             })
         }));
 
-        // Spawn cleanup task for old segments
-        let cleanup_state = Arc::clone(&background_state);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                cleanup_state.cleanup_old_segments();
-            }
-        });
-
         let call_id = call.call_id().to_string();
         let cleanup = async move {
             info!("🤖 LLMao copilot finished for call {}", call_id);
@@ -249,11 +233,12 @@ impl MediaHandler for LLMaoRepairCopilot {
 
 async fn handle_repair_request(
     call: CopilotCallHandle,
-    state: Arc<BackgroundRepairState>,
+    buffer: Arc<Mutex<AudioBuffer>>,
+    repairer: Arc<AudioRepairer>,
     target_stream: StreamType,
     send_to: CopilotSpeechTarget,
 ) -> anyhow::Result<()> {
-    info!("🔧 Starting repair request for {} (sending to {:?})", target_stream, send_to);
+    info!("🔧 Starting repair for {} stream (sending to {:?})", target_stream, send_to);
 
     // Switch to bidirectional mode if needed
     if call.call_mode() == CopilotMode::ListenOnly {
@@ -262,77 +247,89 @@ async fn handle_repair_request(
         info!("✅ Now bidirectional");
     }
 
-    // Check if repair is in progress
-    let segment = if state.is_active(target_stream) {
-        info!("⏳ Repair in progress for {}, waiting...", target_stream);
-        
-        // Announce to user
+    // Get the last 10 seconds of audio from buffer
+    let audio_samples = {
+        let buf = buffer.lock().unwrap();
+        buf.get_samples()
+    };
+
+    if audio_samples.is_empty() {
+        info!("❌ No audio in buffer for {}", target_stream);
         if let Err(e) = call.say(
-            "Audio repair in progress, please wait.",
+            "No audio available to repair.",
             send_to,
             Some(MixMode::Override)
         ) {
-            warn!("⚠️ Failed to announce in-progress: {}", e);
+            warn!("⚠️ Failed to announce no audio: {}", e);
         }
+        return Ok(());
+    }
 
-        // Stop and wait for completion
-        state.stop_and_wait(target_stream, 30).await
-    } else {
-        // Just get the most recent segment
-        state.get_recent_segment(target_stream)
-    };
+    let duration_s = audio_samples.len() as f64 / 16000.0;
+    info!("📦 Retrieved {:.1}s of audio from buffer", duration_s);
 
-    // Check if we have a segment to play
-    let segment = match segment {
-        Some(seg) => seg,
-        None => {
-            info!("ℹ️ No repaired audio available for {}", target_stream);
-            if let Err(e) = call.say(
-                "No repaired audio available.",
-                send_to,
-                Some(MixMode::Override)
-            ) {
-                warn!("⚠️ Failed to announce no audio: {}", e);
+    // Announce repair starting
+    match call.say(
+        "Analyzing and repairing audio...",
+        send_to,
+        Some(MixMode::Override)
+    ) {
+        Ok(speech_handle) => {
+            if let Err(e) = speech_handle.await_completion().await {
+                warn!("⚠️ Failed to wait for announcement: {}", e);
             }
-            return Ok(());
         }
-    };
+        Err(e) => {
+            warn!("⚠️ Failed to announce: {}", e);
+        }
+    }
 
-    let duration = segment.duration_s();
-    info!("📦 Found repaired segment: {:.1}s", duration);
+    // Repair the audio
+    info!("🔄 Sending {:.1}s of audio for repair...", duration_s);
+    let repaired_samples = repairer.repair_audio(&audio_samples).await?;
+    
+    let repaired_duration = repaired_samples.len() as f64 / 16000.0;
+    info!("✅ Received {:.1}s of repaired audio", repaired_duration);
 
     // Announce playback
-    if let Err(e) = call.say(
+    match call.say(
         "Playing repaired audio.",
         send_to,
         Some(MixMode::Override)
     ) {
-        warn!("⚠️ Failed to announce playback: {}", e);
+        Ok(speech_handle) => {
+            if let Err(e) = speech_handle.await_completion().await {
+                warn!("⚠️ Failed to wait for announcement: {}", e);
+            }
+        }
+        Err(e) => {
+            warn!("⚠️ Failed to announce playback: {}", e);
+        }
     }
 
-    // Play back the audio to the requesting party
-    send_repaired_audio(&call, &segment, send_to).await?;
+    // Play back the repaired audio
+    send_repaired_audio(&call, &repaired_samples, send_to).await?;
 
-    // Remove the segment after playing
-    state.remove_segment(&segment);
-    info!("✅ Repaired audio sent and removed");
-
+    info!("✅ Repaired audio sent successfully");
     Ok(())
 }
 
 async fn send_repaired_audio(
     call: &CopilotCallHandle,
-    segment: &background_repair::RepairedSegment,
+    samples: &[i16],
     target: CopilotSpeechTarget,
 ) -> anyhow::Result<()> {
-    const CHUNK_SIZE_MS: usize = 100;
+    const CHUNK_SIZE_MS: usize = 32;  // Match browser audio packet size
     const SAMPLE_RATE: usize = 16000;
     let chunk_samples = (SAMPLE_RATE * CHUNK_SIZE_MS) / 1000;
 
-    info!("🔊 Sending {:.1}s of audio in {}ms chunks", 
-          segment.duration_s(), CHUNK_SIZE_MS);
+    let duration_s = samples.len() as f64 / SAMPLE_RATE as f64;
+    info!("🔊 Sending {:.1}s of audio in {}ms chunks", duration_s, CHUNK_SIZE_MS);
 
-    for (i, chunk) in segment.audio_pcm.chunks(chunk_samples).enumerate() {
+    let chunks: Vec<_> = samples.chunks(chunk_samples).collect();
+    info!("📦 Total chunks to send: {}", chunks.len());
+
+    for (i, chunk) in chunks.iter().enumerate() {
         let audio_bytes = samples_to_bytes(chunk);
         
         match target {
@@ -347,9 +344,13 @@ async fn send_repaired_audio(
             }
         }
 
-        if (i + 1) % 10 == 0 {
-            info!("   Sent chunk {} / {}", i + 1, segment.audio_pcm.len() / chunk_samples + 1);
+        if (i + 1) % 50 == 0 {
+            info!("   Sent chunk {} / {}", i + 1, chunks.len());
         }
+        
+        // Sleep for the actual duration of the chunk to match real-time playback
+        // Use slightly less than the chunk duration to avoid gaps
+        tokio::time::sleep(tokio::time::Duration::from_millis((CHUNK_SIZE_MS as u64) - 2)).await;
     }
 
     info!("✅ All audio chunks sent");

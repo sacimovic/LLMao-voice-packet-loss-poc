@@ -11,12 +11,14 @@ use gap_validator::GapValidator;
 use stream_analyzer::StreamAnalyzer;
 use types::*;
 
+#[allow(dead_code)]
 pub struct AudioDegradationDetector {
     caller_analyzer: Mutex<StreamAnalyzer>,
     callee_analyzer: Mutex<StreamAnalyzer>,
     validator: Mutex<GapValidator>,
 }
 
+#[allow(dead_code)]
 impl AudioDegradationDetector {
     pub fn new(
         on_repair_requested: RepairCallback,
