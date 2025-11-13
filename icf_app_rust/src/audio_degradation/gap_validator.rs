@@ -6,6 +6,7 @@ use super::types::*;
 struct GapRecord {
     time: Instant,
     duration_ms: f64,
+    #[allow(dead_code)]
     confidence: f32,
 }
 

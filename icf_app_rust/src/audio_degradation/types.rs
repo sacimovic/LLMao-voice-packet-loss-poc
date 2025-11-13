@@ -8,10 +8,10 @@ pub const DISCONTINUITY_THRESHOLD: f32 = 0.15; // Normalized amplitude jump
 pub const HISTORY_BUFFER_CHUNKS: usize = 64;   // ~2 seconds
 
 // Pattern detection
-pub const PATTERN_WINDOW_MS: f64 = 5000.0;
-pub const MIN_GAPS_FOR_PATTERN: usize = 3;
-pub const MAX_GAP_FOR_PATTERN_MS: f64 = 500.0;
-pub const MIN_SPEECH_ENERGY: f32 = 0.01;
+pub const PATTERN_WINDOW_MS: f64 = 10000.0;  // Look back 10 seconds instead of 5
+pub const MIN_GAPS_FOR_PATTERN: usize = 2;    // Only need 2 gaps instead of 3
+pub const MAX_GAP_FOR_PATTERN_MS: f64 = 5000.0; // Allow gaps up to 5 seconds (was 500ms)
+pub const MIN_SPEECH_ENERGY: f32 = 0.001;     // Lower threshold (was 0.01)
 pub const DEFAULT_ALERT_INTERVAL_MS: f64 = 5000.0;
 
 // Re-export SpeakingParty from the SDK (defined in icf_media_sdk::enums)
@@ -29,6 +29,7 @@ pub struct GapEvent {
     pub party: SpeakingParty,
     pub duration_ms: f64,
     pub confidence: f32,
+    #[allow(dead_code)]
     pub had_discontinuity: bool,
     pub time: Instant,  // When gap ended
 }

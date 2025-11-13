@@ -23,6 +23,7 @@ impl AudioBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_samples(&self) -> Vec<i16> {
         self.buffer.iter().copied().collect()
     }

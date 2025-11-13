@@ -93,9 +93,17 @@ impl AudioRepairer {
             .context("Failed to decode repaired audio")?;
 
         // Convert WAV back to samples
-        let samples = wav_to_samples(&repaired_wav)?;
+        let (samples, source_sample_rate) = wav_to_samples_with_rate(&repaired_wav)?;
         
-        Ok(samples)
+        // Resample to 16kHz if needed (XTTS outputs 24kHz)
+        let resampled = if source_sample_rate != 16000 {
+            log::info!("🔄 Resampling from {}Hz to 16000Hz", source_sample_rate);
+            resample_audio(&samples, source_sample_rate, 16000)?
+        } else {
+            samples
+        };
+        
+        Ok(resampled)
     }
 }
 
@@ -119,10 +127,58 @@ fn samples_to_wav(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
-fn wav_to_samples(wav_bytes: &[u8]) -> Result<Vec<i16>> {
+fn wav_to_samples_with_rate(wav_bytes: &[u8]) -> Result<(Vec<i16>, u32)> {
     let cursor = Cursor::new(wav_bytes);
     let mut reader = hound::WavReader::new(cursor)?;
+    let sample_rate = reader.spec().sample_rate;
     
     let samples: Result<Vec<i16>, _> = reader.samples::<i16>().collect();
-    samples.context("Failed to read samples from WAV")
+    let samples = samples.context("Failed to read samples from WAV")?;
+    
+    Ok((samples, sample_rate))
+}
+
+fn resample_audio(samples: &[i16], from_rate: u32, to_rate: u32) -> Result<Vec<i16>> {
+    use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
+    
+    if from_rate == to_rate {
+        return Ok(samples.to_vec());
+    }
+    
+    // Convert i16 to f32
+    let input_f32: Vec<f32> = samples
+        .iter()
+        .map(|&s| s as f32 / i16::MAX as f32)
+        .collect();
+    
+    // Rubato expects channels as Vec<Vec<f32>>, we have mono
+    let input_channels = vec![input_f32];
+    
+    // Create resampler
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    
+    let mut resampler = SincFixedIn::<f32>::new(
+        to_rate as f64 / from_rate as f64,
+        2.0,
+        params,
+        input_channels[0].len(),
+        1,
+    )?;
+    
+    // Process audio
+    let output_channels = resampler.process(&input_channels, None)?;
+    
+    // Convert back to i16
+    let output_i16: Vec<i16> = output_channels[0]
+        .iter()
+        .map(|&s| (s * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+        .collect();
+    
+    Ok(output_i16)
 }
