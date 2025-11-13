@@ -282,12 +282,16 @@ export default function App() {
       try {
         data = await res.json()
       } catch (jsonErr) {
-        throw new Error(`Backend returned invalid JSON: ${jsonErr}`)
+        // If we can't parse JSON, try to get response text for better error message
+        const text = await res.text().catch(() => 'No response body')
+        throw new Error(`Backend communication error: Server returned ${res.status}. ${text || 'Empty response'}`)
       }
 
       if (!res.ok) {
-        const message = data?.error || `Backend error (${res.status})`
-        throw new Error(message)
+        // Use detailed error message from backend
+        const mainError = data?.error || `Backend error (${res.status})`
+        const details = data?.details ? `\n\nDetails: ${data.details}` : ''
+        throw new Error(`${mainError}${details}`)
       }
 
       const elapsed = performance.now() - processingStartRef.current
@@ -303,7 +307,7 @@ export default function App() {
       const message = e instanceof Error ? e.message : String(e)
       setError(message)
       setStatusPhase('error')
-      setStatusMessage(message)
+      setStatusMessage('Processing failed. See error below.')
     } finally {
       setLoading(false)
     }

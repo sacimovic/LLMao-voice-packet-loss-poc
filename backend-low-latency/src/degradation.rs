@@ -55,20 +55,3 @@ pub fn degrade_audio_window(
 
     output
 }
-
-pub fn degrade_audio_window(samples: &[f32], window_start_ms: u32, window_ms: u32) -> Vec<f32> {
-    let mut output = samples.to_vec();
-    let sample_rate = 16000;
-    
-    let start_sample = ((window_start_ms as f32 / 1000.0) * sample_rate as f32) as usize;
-    let window_samples = ((window_ms as f32 / 1000.0) * sample_rate as f32) as usize;
-    let end_sample = (start_sample + window_samples).min(output.len());
-    
-    if start_sample < output.len() {
-        for sample in &mut output[start_sample..end_sample] {
-            *sample = 0.0;
-        }
-    }
-    
-    output
-}

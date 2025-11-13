@@ -33,6 +33,7 @@ ort = { version = "1.16", features = ["download-binaries"] }
 # Utils
 rand = "0.8"
 num_cpus = "1.16"
+chrono = "0.4"
 
 [profile.release]
 lto = true

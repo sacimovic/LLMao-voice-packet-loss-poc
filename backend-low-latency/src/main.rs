@@ -1,12 +1,12 @@
 ﻿use axum::{
     extract::{Multipart, State},
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use serde::Serialize;
-use std::{env, path::Path, sync::Arc};
+use std::{env, fs, path::Path, sync::Arc};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -17,13 +17,13 @@ mod repair;
 mod tts;
 
 use asr::WhisperModel;
-use degradation::{degrade_audio, degrade_audio_window};
 use audio::{compress_silence, load_audio_mono_16k};
 use repair::BedrockRepair;
 use tts::TTSEngine;
 
 const SAMPLE_RATE: u32 = 16_000;
 const MIN_ASR_SAMPLES: usize = (SAMPLE_RATE as usize) / 5;
+const RECORDINGS_DIR: &str = "recordings";
 
 
 #[derive(Clone)]
@@ -42,6 +42,19 @@ struct ProcessResponse {
     combined_wav_b64: String,
     original_file_path: String,
     degraded_file_path: String,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+    details: Option<String>,
+}
+
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        let status = StatusCode::INTERNAL_SERVER_ERROR;
+        (status, Json(self)).into_response()
+    }
 }
 
 #[tokio::main]
@@ -98,6 +111,10 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState { whisper, repair, tts };
 
+    // Create recordings directory
+    fs::create_dir_all(RECORDINGS_DIR)?;
+    info!("Recordings directory ready at: {}", RECORDINGS_DIR);
+
     info!("Models loaded. Starting server...");
 
     let app = Router::new()
@@ -120,19 +137,28 @@ async fn health() -> &'static str {
 async fn process_audio(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<ProcessResponse>, StatusCode> {
+) -> Result<Json<ProcessResponse>, ErrorResponse> {
     let mut audio_bytes = None;
     let mut degrade_percent = 30;
     let mut degrade_mode = String::from("percentage");
     let mut window_ms = 40u32;
     let mut window_start_ms = 0u32;
 
-    while let Some(field) = multipart.next_field().await.unwrap() {
+    while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         
         match name.as_str() {
             "file" => {
-                audio_bytes = Some(field.bytes().await.unwrap().to_vec());
+                match field.bytes().await {
+                    Ok(bytes) => audio_bytes = Some(bytes.to_vec()),
+                    Err(e) => {
+                        warn!("Failed to read file bytes: {}", e);
+                        return Err(ErrorResponse {
+                            error: "Failed to read uploaded file".to_string(),
+                            details: Some(format!("Could not read file data: {}", e)),
+                        });
+                    }
+                }
             }
             "degrade_percent" => {
                 if let Ok(text) = field.text().await {
@@ -147,7 +173,6 @@ async fn process_audio(
             "window_ms" => {
                 if let Ok(text) = field.text().await {
                     window_ms = text.parse().unwrap_or(40);
-                    window_ms = text.parse().unwrap_or(0);
                 }
             }
             "window_start_ms" => {
@@ -159,10 +184,20 @@ async fn process_audio(
         }
     }
 
-    let audio_bytes = audio_bytes.ok_or(StatusCode::BAD_REQUEST)?;
+    let audio_bytes = audio_bytes.ok_or(ErrorResponse {
+        error: "No audio file provided".to_string(),
+        details: Some("The request must include an audio file in the 'file' field".to_string()),
+    })?;
 
     let original_audio = load_audio_mono_16k(&audio_bytes)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|e| ErrorResponse {
+            error: "Failed to load audio file".to_string(),
+            details: Some(format!("Could not decode audio format: {}", e)),
+        })?;
+
+    // Generate timestamp for this processing session
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let session_id = format!("session-{}", timestamp);
 
     let degraded = if degrade_mode == "window" {
         println!("Using window degradation: start={}ms, length={}ms", window_start_ms, window_ms);
@@ -171,6 +206,22 @@ async fn process_audio(
         println!("Using random degradation: {}%", degrade_percent);
         degradation::degrade_audio_random(&original_audio, degrade_percent as f32)
     };
+
+    // Save original audio
+    let original_path = format!("{}/{}-original.wav", RECORDINGS_DIR, session_id);
+    if let Err(e) = save_wav_to_file(&original_audio, SAMPLE_RATE, &original_path) {
+        warn!("Failed to save original audio: {}", e);
+    } else {
+        info!("Saved original audio to: {}", original_path);
+    }
+
+    // Save degraded audio
+    let degraded_path = format!("{}/{}-degraded.wav", RECORDINGS_DIR, session_id);
+    if let Err(e) = save_wav_to_file(&degraded, SAMPLE_RATE, &degraded_path) {
+        warn!("Failed to save degraded audio: {}", e);
+    } else {
+        info!("Saved degraded audio to: {}", degraded_path);
+    }
 
     let trimmed = compress_silence(&degraded, SAMPLE_RATE);
     let (asr_audio, trimmed_used) = if let Some(ref trimmed_audio) = trimmed {
@@ -201,13 +252,19 @@ async fn process_audio(
         Err(err) if trimmed_used => {
             warn!("Trimmed ASR failed ({}). Retrying with full audio", err);
             state.whisper.transcribe(&degraded).map_err(|fallback_err| {
-                eprintln!("ASR error after fallback: {}", fallback_err);
-                StatusCode::INTERNAL_SERVER_ERROR
+                warn!("ASR error after fallback: {}", fallback_err);
+                ErrorResponse {
+                    error: "Speech recognition failed".to_string(),
+                    details: Some(format!("Whisper ASR error: {}", fallback_err)),
+                }
             })?
         }
         Err(err) => {
-            eprintln!("ASR error: {}", err);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            warn!("ASR error: {}", err);
+            return Err(ErrorResponse {
+                error: "Speech recognition failed".to_string(),
+                details: Some(format!("Whisper ASR error: {}", err)),
+            });
         }
     };
     info!("ASR result: {}", asr_text);
@@ -216,8 +273,11 @@ async fn process_audio(
     info!("Input text length: {} chars", asr_text.len());
     let repaired_text = state.repair.repair(&asr_text).await
         .map_err(|e| {
-            eprintln!("Bedrock repair failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            warn!("Bedrock repair failed: {}", e);
+            ErrorResponse {
+                error: "Text repair failed".to_string(),
+                details: Some(format!("AWS Bedrock error: {}. This could be due to expired credentials, model unavailability, or temporary service issues.", e)),
+            }
         })?;
     info!("Bedrock repair complete. Output: {}", repaired_text);
 
@@ -225,10 +285,21 @@ async fn process_audio(
     info!("Text to synthesize: {}", repaired_text);
     let (tts_audio, tts_sample_rate) = state.tts.synthesize(&repaired_text, Some(&audio_bytes)).await
         .map_err(|e| {
-            eprintln!("TTS failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            warn!("TTS failed: {}", e);
+            ErrorResponse {
+                error: "Speech synthesis failed".to_string(),
+                details: Some(format!("AWS Polly TTS error: {}. Check AWS credentials and service availability.", e)),
+            }
         })?;
     info!("TTS complete. Generated {} samples at {}Hz", tts_audio.len(), tts_sample_rate);
+
+    // Save TTS output
+    let tts_path = format!("{}/{}-repaired.wav", RECORDINGS_DIR, session_id);
+    if let Err(e) = save_wav_to_file(&tts_audio, SAMPLE_RATE, &tts_path) {
+        warn!("Failed to save TTS audio: {}", e);
+    } else {
+        info!("Saved repaired audio to: {}", tts_path);
+    }
 
     let degraded_wav = encode_wav_base64(&degraded, SAMPLE_RATE);
     let repaired_wav = encode_wav_base64(&tts_audio, SAMPLE_RATE);
@@ -240,8 +311,8 @@ async fn process_audio(
         degraded_wav_b64: degraded_wav,
         tts_wav_b64: repaired_wav,
         combined_wav_b64: combined_wav,
-        original_file_path: String::from(""),
-        degraded_file_path: String::from(""),
+        original_file_path: original_path,
+        degraded_file_path: degraded_path,
     }))
 }
 
@@ -257,15 +328,45 @@ fn encode_wav_base64(samples: &[f32], sample_rate: u32) -> String {
     };
 
     let mut cursor = Cursor::new(Vec::new());
-    {
-        let mut writer = WavWriter::new(&mut cursor, spec).unwrap();
-        for &sample in samples {
-            let sample_i16 = (sample * i16::MAX as f32) as i16;
-            writer.write_sample(sample_i16).unwrap();
+    match WavWriter::new(&mut cursor, spec) {
+        Ok(mut writer) => {
+            for &sample in samples {
+                let sample_i16 = (sample * i16::MAX as f32) as i16;
+                let _ = writer.write_sample(sample_i16);
+            }
+            let _ = writer.finalize();
         }
-        writer.finalize().unwrap();
+        Err(e) => {
+            warn!("Failed to create WAV writer: {}", e);
+            return String::new();
+        }
     }
 
     use base64::{Engine, engine::general_purpose};
     general_purpose::STANDARD.encode(cursor.into_inner())
+}
+
+fn save_wav_to_file(samples: &[f32], sample_rate: u32, filepath: &str) -> Result<(), String> {
+    use hound::{WavSpec, WavWriter};
+
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(filepath, spec)
+        .map_err(|e| format!("Failed to create WAV file: {}", e))?;
+
+    for &sample in samples {
+        let sample_i16 = (sample * i16::MAX as f32) as i16;
+        writer.write_sample(sample_i16)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+
+    writer.finalize()
+        .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+
+    Ok(())
 }

@@ -23,40 +23,61 @@ impl BedrockRepair {
             asr_text
         );
 
-        let payload = json!({
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "text": prompt
+        // Try Nova first, then fall back to Claude Haiku
+        let models = vec![
+            ("us.amazon.nova-micro-v1:0", json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "text": prompt
+                    }]
+                }],
+                "inferenceConfig": {
+                    "maxTokens": 200,
+                    "temperature": 0.3
+                }
+            })),
+            ("anthropic.claude-3-haiku-20240307-v1:0", json!({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 200,
+                "temperature": 0.3,
+                "messages": [{
+                    "role": "user",
+                    "content": prompt
                 }]
-            }],
-            "inferenceConfig": {
-                "maxTokens": 200,
-                "temperature": 0.3
-            }
-        });
+            }))
+        ];
 
-        println!("[Bedrock] Sending request to model: us.amazon.nova-micro-v1:0");
-        println!("[Bedrock] Payload: {}", payload.to_string());
+        let mut last_error = None;
+        
+        for (model_id, payload) in models {
+            println!("[Bedrock] Attempting with model: {}", model_id);
+            println!("[Bedrock] Payload: {}", payload.to_string());
 
-        let response = match self
-            .client
-            .invoke_model()
-            .model_id("us.amazon.nova-micro-v1:0")
-            .body(Blob::new(payload.to_string().as_bytes()))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                println!("[Bedrock] Request successful!");
-                resp
+            match self
+                .client
+                .invoke_model()
+                .model_id(model_id)
+                .body(Blob::new(payload.to_string().as_bytes()))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    println!("[Bedrock] Request successful with {}!", model_id);
+                    return self.parse_response(resp, model_id).await;
+                }
+                Err(e) => {
+                    eprintln!("[Bedrock] {} FAILED: {}", model_id, e);
+                    last_error = Some(e);
+                    continue;
+                }
             }
-            Err(e) => {
-                eprintln!("[Bedrock] REQUEST FAILED: {:?}", e);
-                eprintln!("[Bedrock] Error details: {}", e);
-                return Err(anyhow::anyhow!("Failed to invoke Bedrock model: {}", e));
-            }
-        };
+        }
+        
+        Err(anyhow::anyhow!("All Bedrock models failed. Last error: {:?}", last_error))
+    }
+
+    async fn parse_response(&self, response: aws_sdk_bedrockruntime::operation::invoke_model::InvokeModelOutput, model_id: &str) -> Result<String> {
 
         println!("[Bedrock] Received response from Bedrock");
 
@@ -68,11 +89,16 @@ impl BedrockRepair {
 
         println!("[Bedrock] Parsed JSON response: {}", result);
 
-        let repaired = result["output"]["message"]["content"][0]["text"]
-            .as_str()
-            .context("Missing text in Bedrock response")?
-            .trim()
-            .to_string();
+        // Try Nova format first, then Claude format
+        let repaired = if let Some(text) = result["output"]["message"]["content"][0]["text"].as_str() {
+            // Nova format
+            text.trim().to_string()
+        } else if let Some(text) = result["content"][0]["text"].as_str() {
+            // Claude format
+            text.trim().to_string()
+        } else {
+            return Err(anyhow::anyhow!("Could not find text in response from {}", model_id));
+        };
 
         println!("[Bedrock] Repair complete. Result: '{}'", repaired);
         Ok(repaired)

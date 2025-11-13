@@ -396,11 +396,25 @@ body {
 }
 
 .alert {
-  padding: 14px 16px;
+  padding: 18px 20px;
   border-radius: 14px;
   background: rgba(149, 56, 85, 0.45);
   border: 1px solid rgba(255, 126, 159, 0.65);
   color: #ffe5ec;
+  max-width: 100%;
+  word-break: break-word;
+  white-space: pre-wrap;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.alert strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffb3c5;
 }
 
 .analysis-section {
