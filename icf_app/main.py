@@ -14,6 +14,7 @@ import re
 import warnings
 import numpy as np
 from pathlib import Path
+import sys
 
 # Suppress noisy warnings from dependencies
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -23,11 +24,18 @@ from icf_media_sdk import CopilotCall, CopilotMode, copilot_app, MixMode
 
 from audio_processor import AudioBuffer, PacketLossDetector, AudioRepairer
 
+# Import audio degradation detector from backend
+backend_path = Path(__file__).parent.parent / "backend"
+sys.path.insert(0, str(backend_path))
+from audio_degradation_detector import AudioDegradationDetector
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+# Uncomment below for detailed debug logs from the detector
+#logging.getLogger("audio_degradation_detector").setLevel(logging.DEBUG)
 
 # Configuration
 TRIGGER_PATTERNS = [
@@ -83,6 +91,11 @@ class AudioRepairCopilot:
             if re.search(pattern, text_lower):
                 return True
         return False
+
+    def auto_degradation_repair_requested(self, party: str, time: float):
+        """Callback when degradation is detected automatically."""
+        logger.info(f"⚠️ Detected audio degradation in {party} stream")
+        #asyncio.create_task(self.trigger_repair(requesting_party=party))
 
     async def handle_partial_utterance(self, partial):
         """Handle incoming partial transcriptions to detect trigger phrase."""
@@ -286,6 +299,7 @@ async def llmao_repair_copilot(call: CopilotCall):
     copilot = AudioRepairCopilot(call)
 
     try:
+
         # Register audio handlers to buffer incoming audio AND record continuously
         def handle_caller_audio(data: bytes):
             copilot.caller_buffer.add_chunk(data)
@@ -302,6 +316,15 @@ async def llmao_repair_copilot(call: CopilotCall):
 
         # Register partial utterance handler to detect trigger phrase
         call.on_partial_utterance(copilot.handle_partial_utterance)
+
+        logger.info(f"🔍 Setting up audio degradation detector...")
+        # Hook up audio degradation detector
+        detector = AudioDegradationDetector(
+            on_repair_requested=copilot.auto_degradation_repair_requested
+        )
+        detector_task = asyncio.create_task(
+            detector.start(call.caller_audio_stream, call.callee_audio_stream)
+        )
 
         # Wait for call to end
         await call.wait_for_end()
@@ -332,7 +355,7 @@ if __name__ == "__main__":
     trigger_display = ', '.join([p.replace('\\b', '').replace('\\s+', ' ') for p in TRIGGER_PATTERNS])
     print(f"🎯 Trigger phrases: {trigger_display}")
     print(f"💾 Debug recordings: {RECORDINGS_DIR}")
-    print("\nPress Ctrl+C to stop")
+    print("\nPress Ctrl+C to stop")    
     print("=" * 70)
 
     try:
